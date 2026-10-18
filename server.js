@@ -4,7 +4,7 @@ const http = require('http'), crypto = require('crypto'), { WebSocketServer } = 
 const PORT = process.env.PORT || 8080, MAP = 3000, TICK = 50, CAP = 20, TARGET = 14, MAXF = 700, SPD = 170, TURN = 5, VR = 750;
 const SB = process.env.SUPABASE_URL, SK = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const EMOJIS = ['🐱','🐸','🐼','🦊','🐵','🐲','👻','🤖','😈','🐙','🐧','🦄','🐢','🐻'];
+const EMOJIS = ['🐱','🐸','🐼','🦊','🐵','🐲','👻','🤖','😈','🐙','🐧','🦄','🐢','🐻','🐍','🦖','🦈','🦁','👑','🔥','⚡','🍕','🚀','🐝'];
 const BOTN = ['Zeca','Lia','Nuvem','Pixel','Tico','Bia','Rex','Luna','Dudu','Kiko','Mel','Thor'];
 const BAD = ['porra','caralho','puta','merda','fdp','viado','buceta','cuzao','nazi','hitler','admin'];
 const rnd = (a, b) => a + Math.random() * (b - a), rad = m => Math.min(28, 12 + Math.sqrt(m) * .55);
@@ -76,9 +76,14 @@ class Room {
       for (const b of arr) { if (a === b || !a.alive || !b.alive) continue; const hb = b.segs[0], rb = rad(b.m);
         if ((ha.x - hb.x) ** 2 + (ha.y - hb.y) ** 2 < (ra + rb) ** 2 * .5) {          // cabeça x cabeça: o maior (+15%) come; empate = nada
           if (a.m > b.m * 1.15) this.eat(a, b); else if (b.m > a.m * 1.15) this.eat(b, a); continue; }
-        const lim = (ra * .6 + rb * .9) ** 2;                                         // cabeça x corpo: quem tem 1,5x a massa come o dono; senão morre quem encostou
-        for (let i = 2; i < b.segs.length; i++) { const q = b.segs[i], dx = ha.x - q.x, dy = ha.y - q.y;
-          if (dx * dx + dy * dy < lim) { if (a.m >= b.m * 1.5) this.eat(a, b); else this.kill(a, b, false); break; } } } }
+        const lim = (ra * .5 + rb * .7) ** 2;                                         // cabeça x corpo (hitbox mais justa)
+        for (let i = 3; i < b.segs.length; i++) { const q = b.segs[i], dx = ha.x - q.x, dy = ha.y - q.y;
+          if (dx * dx + dy * dy < lim) {
+            if (a.m > b.m * 1.15) this.eat(a, b);                                     // maior bate no corpo do menor: come
+            else if (i >= b.segs.length * .6) {                                       // menor morde a traseira do maior, um pedaço por vez
+              if (this.tick - (a.bite || 0) >= 4 && b.segs.length > 6 && b.prot <= 0) { a.bite = this.tick; b.segs.pop(); const g = Math.min(2, b.m - 10); if (g > 0) { b.m -= g; a.m += g; } }
+            } else this.kill(a, b, false);                                            // bateu na frente do corpo de quem é maior: morre
+            break; } } } }
     for (const [id, s] of this.sn) if (!s.alive) this.sn.delete(id);
     for (let i = 0; i < 4 && this.food.length < MAXF * .8; i++) this.addFood();
     if (this.useBots && this.tick % 40 === 0) this.fillBots();
@@ -95,7 +100,7 @@ class Room {
     const mm = all.map(s => [Math.round(s.segs[0].x), Math.round(s.segs[0].y), Math.floor(s.m), s.id, s.bot ? 1 : 0]), on = this.humans();
     let heat; if (this.tick % 20 === 0) { const n = 10, c = new Array(n * n).fill(0), cs = MAP / n; for (const f of this.food) c[Math.min(n - 1, f.y / cs | 0) * n + Math.min(n - 1, f.x / cs | 0)]++; heat = { n, c }; }
     for (const s of all) { if (s.bot || !s.ws || s.ws.readyState !== 1) continue; const h = s.segs[0], sn = [], f = [];
-      for (const o of all) { const oh = o.segs[0]; if (Math.abs(oh.x - h.x) < VR + 300 && Math.abs(oh.y - h.y) < VR + 300) {
+      for (const o of all) { if (o.segs.some(q => Math.abs(q.x - h.x) < VR + 300 && Math.abs(q.y - h.y) < VR + 300)) {
         const sg = []; for (const q of o.segs) sg.push(Math.round(q.x), Math.round(q.y));
         sn.push({ i: o.id, n: o.n, e: o.e, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), s: sg }); } }
       for (const q of this.food) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) f.push(Math.round(q.x), Math.round(q.y), +q.v.toFixed(1), q.c);

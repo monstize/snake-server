@@ -229,7 +229,7 @@
     }
   };
 
-  const HALLOWEEN_URL = 'https://dbimg.app/ynt0ZJm5';
+  const HALLOWEEN_URL = 'https://cdn.dbimg.app/ynt0ZJm5.mp3';
   let musicAudio = null, musicEnabled = ls.get('es_music', true);
   mb.textContent = musicEnabled ? '🔊' : '🔇';
   mb.setAttribute('aria-label', 'Ligar/desligar música');
@@ -249,11 +249,13 @@
     if (!musicEnabled) return;
     ensureMusic();
     if (!musicAudio) return;
-    const unlock = () => {
+    if (musicAudio.paused === false) return;
+    const tryPlay = () => {
       musicAudio.muted = false;
+      musicAudio.currentTime = 0;
       musicAudio.play().catch(() => {});
     };
-    if (musicAudio.paused) unlock();
+    tryPlay();
   }
 
   function stopHalloweenMusic() {

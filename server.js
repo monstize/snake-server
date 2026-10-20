@@ -2,7 +2,8 @@
 // O cliente só envia ângulo e "fire"; posição, velocidade, cargas, projéteis, bombas, danos e pontuação são decididos aqui.
 const http = require('http'), crypto = require('crypto'), { WebSocketServer } = require('ws');
 const PORT = process.env.PORT || 8080, MAP = 3000, TICK = 50, CAP = 20, TARGET = 14, MAXF = 700, SPD = 170, TURN = 5, VR = 750;
-const EVT_SCORE = +process.env.EVENT_SCORE || 3000, EVT_DUR = Math.round((+process.env.EVENT_DUR_MS || 60000) / TICK), EVT_GAP = +process.env.EVENT_GAP_MAX_MS || 300000;
+const EVT_ENV = +process.env.EVENT_DUR_MS || 0, EVT_GAP = +process.env.EVENT_GAP_MAX_MS || 300000;
+const DURS = { red: 60, bomb: 60, halloween: 150, classic: 180 }, evDur = t => Math.round((EVT_ENV || DURS[t] * 1000) / TICK);   // segundos por tipo de evento
 const MAXCH = 3, CD = 12, MAXP = 30, NORB = 14, NBOMB = 12, PSPD = 420, DT = TICK / 1000;   // cargas máx., recarga 0,6 s, projéteis máx. por sala
 const SB = process.env.SUPABASE_URL, SK = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -29,17 +30,17 @@ class Room {
   constructor(bots = true) { this.sn = new Map(); this.food = []; this.nid = 1; this.tick = 0; this.useBots = bots; this.idle = 0;
     this.ev = null; this.orbs = []; this.bombs = []; this.proj = []; this.nextEv = 0;      // estado dos eventos especiais
     for (let i = 0; i < MAXF * .8; i++) this.addFood();
-    if (bots) for (let i = 0; i < 8; i++) this.fillBots(); }
+    if (bots) { for (let i = 0; i < 8; i++) this.fillBots(); this.nextEv = Math.round(rnd(10000, 60000) / TICK); } }
   humans() { let c = 0; for (const s of this.sn.values()) if (!s.bot && s.alive) c++; return c; }
   addFood(x, y, v, c, force) { if (this.food.length >= MAXF + (force ? 300 : 0)) return;
     this.food.push({ x: x ?? rnd(40, MAP - 40), y: y ?? rnd(40, MAP - 40), v: v || 1, c: c ?? (Math.random() * 8 | 0) }); }
-  spawn(n, e, bot, ws, tok, x, y) {
+  spawn(n, e, bot, ws, tok, x, y, col) {
     const a = rnd(0, 6.28);
     if (x === undefined) for (let t = 0; t < 25; t++) {            // nasce longe de qualquer outra cobrinha
       x = rnd(300, MAP - 300); y = rnd(300, MAP - 300); let free = true;
       for (const o of this.sn.values()) { for (let i = 0; i < o.segs.length; i += 2) { const q = o.segs[i]; if ((q.x - x) ** 2 + (q.y - y) ** 2 < 250 * 250) { free = false; break; } } if (!free) break; }
       if (free) break; }
-    const s = { id: this.nid++, n, e, bot, ws, tok, a, ta: a, m: 10, peak: 10, peakL: 6, alive: true, prot: 60, ch: 0, cd: 0, segs: [], lvl: bot ? Math.random() * 4 | 0 : 0 };
+    const s = { id: this.nid++, n, e, bot, ws, tok, a, ta: a, m: 10, peak: 10, peakL: 6, alive: true, prot: 60, ch: 0, cd: 0, col: Number.isInteger(col) && col >= 0 && col < 8 ? col : Math.random() * 8 | 0, segs: [], lvl: bot ? Math.random() * 4 | 0 : 0 };
     for (let i = 0; i < 6; i++) s.segs.push({ x: x - Math.cos(a) * i * 10, y: y - Math.sin(a) * i * 10 });
     this.sn.set(s.id, s); return s; }
   move(s, dt) {
@@ -77,18 +78,19 @@ class Room {
     if (!this.ev || this.ev.type !== 'red' || !s.alive || s.ch <= 0 || this.tick < s.cd || this.proj.length >= MAXP) return false;
     s.ch--; s.cd = this.tick + CD; const h = s.segs[0], r = rad(s.m) + 14;
     this.proj.push({ x: h.x + Math.cos(s.a) * r, y: h.y + Math.sin(s.a) * r, a: s.a, id: s.id, life: 30 }); return true; }
-  startEvent() { const type = Math.random() < .5 ? 'red' : 'bomb'; this.ev = { type, end: this.tick + EVT_DUR };
-    this.tell({ t: 'ev', k: 'start', type, dur: Math.round(EVT_DUR * TICK / 1000) }); }
+  startEvent(force) {                                    // os 4 eventos são sorteados com a mesma chance, sem depender de pontuação
+    const pool = ['red', 'bomb', 'halloween', 'classic'], type = force || pool[Math.random() * pool.length | 0], d = evDur(type); this.ev = { type, end: this.tick + d };
+    this.tell({ t: 'ev', k: 'start', type, dur: Math.round(d * TICK / 1000) }); }
   endEvent() { const type = this.ev.type; this.ev = null; this.orbs = []; this.bombs = []; this.proj = [];
     for (const s of this.sn.values()) s.ch = 0;
     this.nextEv = this.tick + Math.round(rnd(Math.min(10000, EVT_GAP), EVT_GAP) / TICK);      // pausa aleatória de até 5 min
     this.tell({ t: 'ev', k: 'end', type }); }
   events() {
     const e = this.ev, arr = [...this.sn.values()];
-    if (!e) { if (this.tick >= this.nextEv && this.tick % 20 === 0 && arr.some(s => !s.bot && s.alive && s.m > EVT_SCORE)) this.startEvent(); return; }
+    if (!e) { if (this.tick >= this.nextEv && this.tick % 20 === 0 && arr.some(s => !s.bot && s.alive)) this.startEvent(); return; }
     if (this.tick >= e.end) return this.endEvent();
-    const list = e.type === 'red' ? this.orbs : this.bombs, want = e.type === 'red' ? NORB : NBOMB;
-    while (list.length < want) list.push({ x: rnd(120, MAP - 120), y: rnd(120, MAP - 120) });
+    if (e.type === 'red' || e.type === 'bomb') { const list = e.type === 'red' ? this.orbs : this.bombs, want = e.type === 'red' ? NORB : NBOMB;
+      while (list.length < want) list.push({ x: rnd(120, MAP - 120), y: rnd(120, MAP - 120) }); }
     if (e.type === 'red') {
       for (const s of arr) { if (!s.alive || s.ch >= MAXCH) continue; const h = s.segs[0], R = rad(s.m) + 12;
         for (let i = this.orbs.length - 1; i >= 0; i--) { const o = this.orbs[i]; if ((o.x - h.x) ** 2 + (o.y - h.y) ** 2 < R * R) { s.ch++; this.orbs.splice(i, 1); break; } } }
@@ -97,7 +99,7 @@ class Room {
         if (!done) for (const o of arr) { if (o.id === p.id || !o.alive || o.prot > 0) continue; const R2 = (rad(o.m) * .8 + 8) ** 2;
           for (const q of o.segs) if ((q.x - p.x) ** 2 + (q.y - p.y) ** 2 < R2) { this.hurt(o, .15, 'shot'); done = true; break; } if (done) break; }
         if (done) this.proj.splice(i, 1); }
-    } else for (const s of arr) { if (!s.alive || s.prot > 0) continue; const h = s.segs[0], R = rad(s.m) + 16;
+    } else if (e.type === 'bomb') for (const s of arr) { if (!s.alive || s.prot > 0) continue; const h = s.segs[0], R = rad(s.m) + 16;
       for (let i = this.bombs.length - 1; i >= 0; i--) { const b = this.bombs[i]; if ((b.x - h.x) ** 2 + (b.y - h.y) ** 2 < R * R) { this.hurt(s, .2, 'bomb'); this.bombs.splice(i, 1); break; } } }
   }
 
@@ -122,6 +124,15 @@ class Room {
       if (dx * dx + dy * dy < 450 * 450 && Math.abs(((Math.atan2(dy, dx) - s.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI) < .3) { this.fire(s); break; } }
     s.ta = Math.atan2(vy, vx);
   }
+  wear(a, b, dx, dy, ra, rb) {                       // a ponta da cauda é "sólida" (a cabeça não atravessa) e perde segmentos e massa aos poucos
+    if (b.prot > 0) return;
+    const d = Math.hypot(dx, dy) || 1, L = ra * .5 + rb * .7, h = a.segs[0];
+    if (d < L) { h.x = Math.max(0, Math.min(MAP, h.x + dx / d * (L - d))); h.y = Math.max(0, Math.min(MAP, h.y + dy / d * (L - d))); }
+    if (this.tick - (a.bite | 0) < 4 || b.segs.length <= 6 || b.m <= 10) return; a.bite = this.tick;
+    const g = Math.min(Math.max(2, b.m * .01), b.m - 10), n = Math.min(2, b.segs.length - 6), t = b.segs[b.segs.length - 1];
+    b.m -= g; a.m += g / 2; for (let i = 0; i < n; i++) b.segs.pop(); b.cut = (b.cut | 0) + n; this.addFood(t.x, t.y, g / 2, Math.random() * 8 | 0, true);
+    if (b.ws && b.ws.readyState === 1 && this.tick - (b.hm | 0) >= 20) { b.hm = this.tick; b.ws.send(JSON.stringify({ t: 'hit', k: 'tail', loss: Math.round(g) })); }
+  }
   step() {
     const dt = TICK / 1000; this.tick++;
     const arr = [...this.sn.values()];
@@ -135,12 +146,13 @@ class Room {
         if ((ha.x - hb.x) ** 2 + (ha.y - hb.y) ** 2 < (ra + rb) ** 2 * .5) {          // cabeça x cabeça: o maior (+15%) come; empate = nada
           if (a.m > b.m * 1.15) this.eat(a, b); else if (b.m > a.m * 1.15) this.eat(b, a); continue; }
         const lim = (ra * .5 + rb * .7) ** 2;                                         // cabeça x corpo (hitbox mais justa)
+        const tip = b.segs.length - Math.max(2, Math.round(b.segs.length * .2));      // ponta da cauda = últimos 20% dos segmentos (mín. 2)
         for (let i = 3; i < b.segs.length; i++) { const q = b.segs[i], dx = ha.x - q.x, dy = ha.y - q.y;
           if (dx * dx + dy * dy < lim) {
-            if (a.m > b.m * 1.15) this.eat(a, b);                                     // maior bate no corpo do menor: come
-            else if (i >= b.segs.length * .6) {                                       // menor morde a traseira do maior, um pedaço por vez
-              if (this.tick - (a.bite || 0) >= 4 && b.segs.length > 6 && b.prot <= 0) { a.bite = this.tick; b.segs.pop(); const g = Math.min(2, b.m - 10); if (g > 0) { b.m -= g; a.m += g; } }
-            } else this.kill(a, b, false);                                            // bateu na frente do corpo de quem é maior: morre
+            if (i >= tip) { let bj = i, bd = dx * dx + dy * dy; for (let j = tip; j < b.segs.length; j++) { const e = b.segs[j], ex = ha.x - e.x, ey = ha.y - e.y, ed = ex * ex + ey * ey; if (ed < bd) { bd = ed; bj = j; } }
+              this.wear(a, b, ha.x - b.segs[bj].x, ha.y - b.segs[bj].y, ra, rb); }   // ponta da cauda: desgaste gradual, ninguém morre
+            else if (a.m > b.m * 1.15) this.eat(a, b);                                // corpo: o maior come o dono
+            else this.kill(a, b, false);                                              // corpo: o menor que bate morre
             break; } } } }
     for (const [id, s] of this.sn) if (!s.alive) this.sn.delete(id);
     for (let i = 0; i < 4 && this.food.length < MAXF * .8; i++) this.addFood();
@@ -164,7 +176,7 @@ class Room {
     for (const s of all) { if (s.bot || !s.ws || s.ws.readyState !== 1) continue; const h = s.segs[0], sn = [], f = [];
       for (const o of all) { if (o.segs.some(q => Math.abs(q.x - h.x) < VR + 300 && Math.abs(q.y - h.y) < VR + 300)) {
         const sg = []; for (const q of o.segs) sg.push(Math.round(q.x), Math.round(q.y));
-        sn.push({ i: o.id, n: o.n, e: o.e, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), s: sg }); } }
+        sn.push({ i: o.id, n: o.n, e: o.e, c: o.col, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), s: sg }); } }
       for (const q of this.food) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) f.push(Math.round(q.x), Math.round(q.y), +q.v.toFixed(1), q.c);
       s.ws.send(JSON.stringify({ t: 's', sn, f, lb, mm, on, h: heat }));
       if (this.ev) { const vw = l => { const r = []; for (const q of l) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) r.push(Math.round(q.x), Math.round(q.y)); return r; };
@@ -199,7 +211,7 @@ wss.on('connection', ws => {
     if (m.t === 'join' && !ws.snake) {
       let n = clean(m.nick); if (!okNick(n)) n = 'Jogador' + (Math.random() * 900 + 100 | 0);
       const e = EMOJIS.includes(m.emoji) ? m.emoji : EMOJIS[0], tok = typeof m.tok === 'string' && m.tok.length >= 32 && m.tok.length <= 200 ? m.tok : null;
-      ws.room = place(ws); { const bt = [...ws.room.sn.values()].find(b => b.bot); if (bt) ws.room.sn.delete(bt.id); } ws.snake = ws.room.spawn(n, e, false, ws, tok); ws.snake.ws = ws;
+      ws.room = place(ws); { const bt = [...ws.room.sn.values()].find(b => b.bot); if (bt) ws.room.sn.delete(bt.id); } ws.snake = ws.room.spawn(n, e, false, ws, tok, undefined, undefined, m.col); ws.snake.ws = ws;
       ws.send(JSON.stringify({ t: 'init', id: ws.snake.id, map: MAP }));
       const ev = ws.room.ev; if (ev) ws.send(JSON.stringify({ t: 'ev', k: 'start', type: ev.type, dur: Math.ceil((ev.end - ws.room.tick) * TICK / 1000), late: 1 }));
     }

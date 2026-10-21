@@ -52,8 +52,9 @@ class Room {
     if (s.cut > 0 && this.tick % 6 === 0) s.cut--;
     while (s.segs.length < want) { const l = s.segs[s.segs.length - 1]; s.segs.push({ x: l.x, y: l.y }); }
     while (s.segs.length > want && s.segs.length > 6) s.segs.pop();                 // perda de massa encurta a cauda
+    const rigid = this.ev && this.ev.type === 'classic';            // Snake clássico: espaçamento fixo, o corpo segue o caminho da cabeça sem encolher nas curvas
     for (let i = 1; i < s.segs.length; i++) { const p = s.segs[i - 1], q = s.segs[i], dx = p.x - q.x, dy = p.y - q.y, dd = Math.hypot(dx, dy);
-      if (dd > sp) { const k = (dd - sp) / dd; q.x += dx * k; q.y += dy * k; } }
+      if (dd > sp || (rigid && dd > 1e-3 && dd < sp * .6)) { const k = (dd - sp) / dd; q.x += dx * k; q.y += dy * k; } }
     s.peak = Math.max(s.peak, s.m); s.peakL = Math.max(s.peakL, s.segs.length);
   }
   kill(b, by, eaten) {
@@ -63,7 +64,24 @@ class Room {
     if (b.ws && b.ws.readyState === 1) b.ws.send(JSON.stringify({ t: 'dead', score: Math.floor(b.peak), len: b.peakL, by: by ? by.n : null, wall: !!b.wall }));
     if (b.ws) b.ws.snake = null; save(b);
   }
-  eat(a, b) { if (!a.alive || !b.alive || b.prot > 0) return; a.m += b.m * .5; this.kill(b, a, true); }
+  eat(a, b, full) { if (!a.alive || !b.alive || b.prot > 0) return; a.m += b.m * (full ? 1 : .5); this.kill(b, a, true);
+    if (a.ws && a.ws.readyState === 1 && this.tick - (a.ch_t | 0) >= 2) { a.ch_t = this.tick; a.ws.send('{"t":"chomp"}'); } }   // som de mordida só para quem comeu
+  classicHits(arr) {                                  // Snake clássico (calculado só aqui no servidor): corpo/cauda matam sempre; cabeça x cabeça o maior come o menor
+    const segD2 = (px, py, A, B) => { const vx = B.x - A.x, vy = B.y - A.y, l = vx * vx + vy * vy; let t = l ? ((px - A.x) * vx + (py - A.y) * vy) / l : 0; t = t < 0 ? 0 : t > 1 ? 1 : t; const x = A.x + vx * t - px, y = A.y + vy * t - py; return x * x + y * y; };
+    const dead = new Map(), eats = [], clash = new Set();
+    for (let i = 0; i < arr.length; i++) { const a = arr[i]; if (!a.alive) continue; const ha = a.segs[0], ra = rad(a.m);
+      for (let j = i + 1; j < arr.length; j++) { const b = arr[j]; if (!b.alive) continue; const hb = b.segs[0], rb = rad(b.m);
+        if ((ha.x - hb.x) ** 2 + (ha.y - hb.y) ** 2 < ((ra + rb) * .8) ** 2) { clash.add(a.id + ':' + b.id); clash.add(b.id + ':' + a.id);
+          if (a.m > b.m) eats.push([a, b]); else if (b.m > a.m) eats.push([b, a]); else { dead.set(a, b); dead.set(b, a); } } } }
+    for (const [w, l] of eats) if (!dead.has(w)) { dead.delete(l); l._eaten = w; }
+    for (const a of arr) { if (!a.alive || a._eaten || dead.has(a) || a.prot > 0) continue; const h = a.segs[0], ra = rad(a.m), sp = ra * .9;
+      for (const b of arr) { if (!b.alive || b.segs.length < 2) continue; const rb = rad(b.m), self = a === b; if (clash.has(a.id + ':' + b.id)) continue;   // confronto de cabeças já decidido acima
+        const from = self ? Math.max(4, Math.ceil((Math.PI * SPD / TURN + ra * 2.2) / sp)) : 1;    // ignora o trecho logo atrás da cabeça (curva mais fechada possível)
+        const lim = (self ? ra * .7 : ra * .55 + rb * .75) ** 2;
+        for (let k = from; k < b.segs.length; k++) if (segD2(h.x, h.y, b.segs[k - 1], b.segs[k]) < lim) { dead.set(a, self ? null : b); break; }
+        if (dead.has(a)) break; } }
+    for (const a of arr) if (a._eaten) { const w = a._eaten; delete a._eaten; if (w.alive && !dead.has(w)) this.eat(w, a, true); }
+    for (const [a, by] of dead) this.kill(a, by, false); }
 
   /* ---------- EVENTOS ESPECIAIS ---------- */
   tell(o) { const j = JSON.stringify(o); for (const s of this.sn.values()) if (!s.bot && s.ws && s.ws.readyState === 1) s.ws.send(j); }
@@ -98,6 +116,84 @@ class Room {
         let done = --p.life <= 0 || p.x < 0 || p.y < 0 || p.x > MAP || p.y > MAP;
         if (!done) for (const o of arr) { if (o.id === p.id || !o.alive || o.prot > 0) continue; const R2 = (rad(o.m) * .8 + 8) ** 2;
           for (const q of o.segs) if ((q.x - p.x) ** 2 + (q.y - p.y) ** 2 < R2) { this.hurt(o, .15, 'shot'); done = true; break; } if (done) break; }
+        if (done) this.proj.splice(i, 1); }
+    } else if (e.type === 'bomb') for (const s of arr) { if (!s.alive || s.prot > 0) continue; const h = s.segs[0], R = rad(s.m) + 16;
+      for (let i = this.bombs.length - 1; i >= 0; i--) { const b = this.bombs[i]; if ((b.x - h.x) ** 2 + (b.y - h.y) ** 2 < R * R) { this.hurt(s, .2, 'bomb'); this.bombs.splice(i, 1); break; } } }
+  }
+
+  ai(s) {                                            // IA dos bots: níveis 0 (iniciante) a 3 (difícil)
+    const h = s.segs[0], red = this.ev && this.ev.type === 'red'; let best = null, bd = 1e12;
+    for (const f of this.food) { const d = ((f.x - h.x) ** 2 + (f.y - h.y) ** 2) / f.v; if (d < bd) { bd = d; best = f; } }
+    if (red && s.ch < MAXCH) { let od = 700 * 700; for (const o of this.orbs) { const d = (o.x - h.x) ** 2 + (o.y - h.y) ** 2; if (d < od) { od = d; best = o; } } }   // bots também coletam as bolinhas vermelhas
+    let vx = 0, vy = 0; if (best) { const a = Math.atan2(best.y - h.y, best.x - h.x); vx = Math.cos(a); vy = Math.sin(a); }
+    if (this.ev && this.ev.type === 'bomb') for (const b of this.bombs) { const dx = h.x - b.x, dy = h.y - b.y, d2 = dx * dx + dy * dy, R = 170;   // todos os bots desviam das bombas
+      if (d2 < R * R && d2 > 1) { const w = 4 * (R * R - d2) / (R * R) / Math.sqrt(d2); vx += dx * w; vy += dy * w; } }
+    if (s.lvl === 0) { s.ta = Math.atan2(vy, vx) + rnd(-.6, .6); return; }
+    let chase = null, cd = (s.lvl >= 3 ? 700 : 500) ** 2;
+    for (const o of this.sn.values()) { if (o === s || !o.alive) continue; const oh = o.segs[0];
+      const danger = s.m < o.m * 1.5, step = s.lvl >= 3 ? 2 : 3;
+      if (danger) for (let i = 0; i < o.segs.length; i += step) { const q = o.segs[i], dx = h.x - q.x, dy = h.y - q.y, d2 = dx * dx + dy * dy, R = i === 0 ? 260 : 120;
+        if (d2 < R * R && d2 > 1) { const w = 3 * (R * R - d2) / (R * R) / Math.sqrt(d2); vx += dx * w; vy += dy * w; } }
+      if (s.lvl >= 2 && s.m >= o.m * 1.5) { const d2 = (oh.x - h.x) ** 2 + (oh.y - h.y) ** 2; if (d2 < cd) { cd = d2; chase = o; } } }
+    if (chase) { const c = chase.segs[0], a = Math.atan2(c.y - h.y + Math.sin(chase.a) * 80, c.x - h.x + Math.cos(chase.a) * 80); vx += Math.cos(a) * 1.5; vy += Math.sin(a) * 1.5; }
+    if (h.x < 150) vx += 2; if (h.x > MAP - 150) vx -= 2; if (h.y < 150) vy += 2; if (h.y > MAP - 150) vy -= 2;
+    if (red && s.ch > 0 && this.tick >= s.cd && Math.random() < .6) for (const o of this.sn.values()) {        // bots (nível 1+) atiram em quem está à frente
+      if (o === s || !o.alive || o.prot > 0) continue; const oh = o.segs[0], dx = oh.x - h.x, dy = oh.y - h.y;
+      if (dx * dx + dy * dy < 450 * 450 && Math.abs(((Math.atan2(dy, dx) - s.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI) < .3) { this.fire(s); break; } }
+    s.ta = Math.atan2(vy, vx);
+  }
+  wear(a, b, dx, dy, ra, rb) {                       // a ponta da cauda é "sólida" (a cabeça não atravessa) e perde segmentos e massa aos poucos
+    if (b.prot > 0) return;
+    const d = Math.hypot(dx, dy) || 1, L = ra * .5 + rb * .7, h = a.segs[0];
+    if (d < L) { h.x = Math.max(0, Math.min(MAP, h.x + dx / d * (L - d))); h.y = Math.max(0, Math.min(MAP, h.y + dy / d * (L - d))); }
+    if (this.tick - (a.bite | 0) < 4 || b.segs.length <= 6 || b.m <= 10) return; a.bite = this.tick;
+    const g = Math.min(Math.max(2, b.m * .01), b.m - 10), n = Math.min(2, b.segs.length - 6), t = b.segs[b.segs.length - 1];
+    b.m -= g; a.m += g / 2; for (let i = 0; i < n; i++) b.segs.pop(); b.cut = (b.cut | 0) + n; this.addFood(t.x, t.y, g / 2, Math.random() * 8 | 0, true);
+    if (b.ws && b.ws.readyState === 1 && this.tick - (b.hm | 0) >= 20) { b.hm = this.tick; b.ws.send(JSON.stringify({ t: 'hit', k: 'tail', loss: Math.round(g) })); }
+  }
+  step() {
+    const dt = TICK / 1000; this.tick++;
+    const arr = [...this.sn.values()];
+    for (const s of arr) { if (s.prot > 0) s.prot--; if (s.bot && this.tick % 3 === 0) this.ai(s); this.move(s, dt); }
+    for (const s of arr) { const h = s.segs[0], R = rad(s.m) + 10;
+      for (let i = this.food.length - 1; i >= 0; i--) { const f = this.food[i], dx = f.x - h.x, dy = f.y - h.y;
+        if (dx * dx + dy * dy < R * R) { s.m += f.v; this.food[i] = this.food[this.food.length - 1]; this.food.pop(); } } }
+    this.events();
+    if (this.ev && this.ev.type === 'classic') this.classicHits(arr); else
+    for (const a of arr) { if (!a.alive) continue; const ha = a.segs[0], ra = rad(a.m);
+      for (const b of arr) { if (a === b || !a.alive || !b.alive) continue; const hb = b.segs[0], rb = rad(b.m);
+        if ((ha.x - hb.x) ** 2 + (ha.y - hb.y) ** 2 < (ra + rb) ** 2 * .5) {          // cabeça x cabeça: o maior (+15%) come; empate = nada
+          if (a.m > b.m * 1.15) this.eat(a, b); else if (b.m > a.m * 1.15) this.eat(b, a); continue; }
+        const lim = (ra * .5 + rb * .7) ** 2;                                         // cabeça x corpo (hitbox mais justa)
+        const tip = b.segs.length - Math.max(2, Math.round(b.segs.length * .2));      // ponta da cauda = últimos 20% dos segmentos (mín. 2)
+        for (let i = 3; i < b.segs.length; i++) { const q = b.segs[i], dx = ha.x - q.x, dy = ha.y - q.y;
+          if (dx * dx + dy * dy < lim) {
+            if (i >= tip) { let bj = i, bd = dx * dx + dy * dy; for (let j = tip; j < b.segs.length; j++) { const e = b.segs[j], ex = ha.x - e.x, ey = ha.y - e.y, ed = ex * ex + ey * ey; if (ed < bd) { bd = ed; bj = j; } }
+              this.wear(a, b, ha.x - b.segs[bj].x, ha.y - b.segs[bj].y, ra, rb); }   // ponta da cauda: desgaste gradual, ninguém morre
+            else if (a.m > b.m * 1.15) this.eat(a, b);                                // corpo: o maior come o dono
+            else this.kill(a, b, false);                                              // corpo: o menor que bate morre
+            break; } } } }
+    for (const [id, s] of this.sn) if (!s.alive) this.sn.delete(id);
+    for (let i = 0; i < 4 && this.food.length < MAXF * .8; i++) this.addFood();
+    if (this.useBots && this.tick % 40 === 0) this.fillBots();
+    this.idle = this.humans() ? 0 : this.idle + 1;
+    this.broadcast();
+  }
+  fillBots() {
+    const want = Math.max(4, TARGET - this.humans()), bots = [...this.sn.values()].filter(s => s.bot);
+    if (bots.length < want) this.spawn('🤖 ' + BOTN[Math.random() * BOTN.length | 0], EMOJIS[Math.random() * EMOJIS.length | 0], true);
+    else if (bots.length > want) this.sn.delete(bots[0].id);
+  }
+  broadcast() {
+    const all = [...this.sn.values()], lb = all.slice().sort((a, b) => b.m - a.m).slice(0, 5).map(s => [s.n, s.e, Math.floor(s.m), s.bot ? 1 : 0]);
+    const mm = all.map(s => [Math.round(s.segs[0].x), Math.round(s.segs[0].y), Math.floor(s.m), s.id, s.bot ? 1 : 0]), on = this.humans();
+    let heat; if (this.tick % 20 === 0) { const n = 10, c = new Array(n * n).fill(0), cs = MAP / n; for (const f of this.food) c[Math.min(n - 1, f.y / cs | 0) * n + Math.min(n - 1, f.x / cs | 0)]++; heat = { n, c }; }
+    const hum = all.filter(s => !s.bot && s.alive);
+    for (const s of hum) { const above = new Set(hum.filter(o => o !== s && o.m > s.m).map(o => o.id));
+      if (s.above && s.ws && s.ws.readyState === 1) for (const id of above) if (!s.above.has(id)) { const o = this.sn.get(id); if (o) s.ws.send(JSON.stringify({ t: 'pass', n: o.n, e: o.e })); }
+      s.above = above; }
+    for (const s of all) { if (s.bot || !s.ws || s.ws.readyState !== 1) continue; const h = s.segs[0], sn = [], f = [];
+      for (const o of all) { if (o.segs.some(q => Math.abs(q.x - h.x) < VR done = true; break; } if (done) break; }
         if (done) this.proj.splice(i, 1); }
     } else if (e.type === 'bomb') for (const s of arr) { if (!s.alive || s.prot > 0) continue; const h = s.segs[0], R = rad(s.m) + 16;
       for (let i = this.bombs.length - 1; i >= 0; i--) { const b = this.bombs[i]; if ((b.x - h.x) ** 2 + (b.y - h.y) ** 2 < R * R) { this.hurt(s, .2, 'bomb'); this.bombs.splice(i, 1); break; } } }

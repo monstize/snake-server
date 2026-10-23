@@ -174,6 +174,94 @@ class Room {
       if (danger) for (let i = 0; i < o.segs.length; i += step) { const q = o.segs[i], dx = h.x - q.x, dy = h.y - q.y, d2 = dx * dx + dy * dy, R = i === 0 ? 260 : 120;
         if (d2 < R * R && d2 > 1) { const w = 3 * (R * R - d2) / (R * R) / Math.sqrt(d2); vx += dx * w; vy += dy * w; if (d2 < 150 * 150) flee++; } }
       if (s.lvl >= 2 && s.m >= o.m * 1.5) { const d2 = (oh.x - h.x) ** 2 + (oh.y - h.y) ** 2; if (d2 < cd) { cd = d2; chase = o; } } }
+    if (chase) { const c = chase.segs[0], a = Math.atan2(c.y - h.y + Math.sin(chase.a) * 80, c.x - h.x + Math.cos(chase.a) w = a._eaten; delete a._eaten; if (w.alive && !dead.has(w)) this.eat(w, a, true); }
+    for (const [a, by] of dead) this.kill(a, by, false); }
+
+  /* ---------- EVENTOS ESPECIAIS ---------- */
+  tell(o) { const j = JSON.stringify(o); for (const s of this.sn.values()) if (!s.bot && s.ws && s.ws.readyState === 1) s.ws.send(j); }
+  hurt(o, frac, kind) {                                  // perde cauda e pontos, NUNCA morre (massa mínima 10)
+    const loss = Math.min(o.m - 10, Math.max(4, o.m * frac)); if (loss <= 0) return 0; o.m -= loss;
+    const n = Math.min(Math.max(4, Math.round(o.segs.length * frac)), o.segs.length - 6);                    // cauda perdida (visível mesmo em cobras gigantes)
+    for (let i = 0; i < n; i++) o.segs.pop(); o.cut = (o.cut | 0) + n;
+    const t = o.segs[o.segs.length - 1]; for (let i = 0; i < 4; i++) this.addFood(t.x + rnd(-20, 20), t.y + rnd(-20, 20), loss * .5 / 4, Math.random() * 8 | 0, true);
+    if (o.ws && o.ws.readyState === 1) o.ws.send(JSON.stringify({ t: 'hit', k: kind, loss: Math.round(loss) }));
+    return loss; }
+  fire(s) {                                              // tiro na direção em que a cobrinha realmente está indo (decidido no servidor)
+    if (!this.ev || this.ev.type !== 'red' || !s.alive || s.ch <= 0 || this.tick < s.cd || this.proj.length >= MAXP) return false;
+    s.ch--; s.cd = this.tick + CD; const h = s.segs[0], r = rad(s.m) + 14;
+    this.proj.push({ x: h.x + Math.cos(s.a) * r, y: h.y + Math.sin(s.a) * r, a: s.a, id: s.id, life: 30 }); return true; }
+  startEvent(force, fname) {                             // os 5 eventos são sorteados com a mesma chance, sem depender de pontuação
+    const pool = ['red', 'bomb', 'halloween', 'classic', 'letters'], type = force || pool[Math.random() * pool.length | 0], d = evDur(type); this.ev = { type, end: this.tick + d, id: ++this.evSeq };
+    if (type === 'letters') { this.ev.name = fname || NAMES[Math.random() * NAMES.length | 0]; this.spc = this.makeSpecial(this.ev.name); for (const s of this.sn.values()) if (!s.bot && s.alive && s.ws) this.makeQuest(s.ws); }
+    this.tell({ t: 'ev', k: 'start', type, dur: Math.round(d * TICK / 1000), name: this.ev.name }); }
+  endEvent() { const type = this.ev.type; this.ev = null; this.orbs = []; this.bombs = []; this.proj = [];
+    for (const s of this.sn.values()) s.ch = 0;
+    this.spc = null; for (const w of this.qs) w.quest = null; this.qs.clear();      // fim do evento: some a cobra especial e o progresso de todos
+    this.nextEv = this.tick + Math.round(rnd(Math.min(10000, EVT_GAP), EVT_GAP) / TICK);      // pausa aleatória de até 5 min
+    this.tell({ t: 'ev', k: 'end', type }); }
+  /* ---------- CAÇA ÀS LETRAS ---------- */
+  makeQuest(ws) {                                        // progresso PRÓPRIO de cada jogador: letras só dele, uma por posição do nome (repetidas incluídas)
+    const up = this.ev.name.toUpperCase(), pts = [];
+    for (let i = 0; i < up.length; i++) { let p; for (let t = 0; t < 40; t++) { p = { x: rnd(160, MAP - 160), y: rnd(160, MAP - 160) }; if (pts.every(q => (q.x - p.x) ** 2 + (q.y - p.y) ** 2 > 320 * 320)) break; } pts.push({ x: p.x, y: p.y, i, ch: up[i], got: false }); }
+    ws.quest = { evId: this.ev.id, room: this, letters: pts, mask: 0, done: false, complete: false }; this.qs.add(ws); return ws.quest; }
+  joinQuest(ws) { const q = ws.quest; if (this.ev && this.ev.type === 'letters') { if (!(q && q.room === this && q.evId === this.ev.id)) this.makeQuest(ws); } else ws.quest = null; }   // quem morre e volta no mesmo evento mantém o progresso; quem entra no meio começa do zero
+  makeSpecial(name) { const n = name.length, x = rnd(400, MAP - 400), y = rnd(400, MAP - 400), a = rnd(0, 6.28);
+    return { name, a, wx: x, wy: y, wt: 0, segs: Array.from({ length: n }, (_, i) => ({ x: x - Math.cos(a) * i * SPSP, y: y - Math.sin(a) * i * SPSP })) }; }   // 1 segmento por letra do nome
+  lettersStep(arr) {
+    const sp = this.spc;
+    if (sp) {                                            // cobra especial: IA que percorre o mapa; não come, não mata, não morre e não entra nas colisões
+      const h = sp.segs[0];
+      if (this.tick >= sp.wt || (sp.wx - h.x) ** 2 + (sp.wy - h.y) ** 2 < 150 * 150) { sp.wx = rnd(250, MAP - 250); sp.wy = rnd(250, MAP - 250); sp.wt = this.tick + 200; }
+      const ta = Math.atan2(sp.wy - h.y, sp.wx - h.x), d = ((ta - sp.a + Math.PI * 3) % (Math.PI * 2)) - Math.PI, t = 3 * DT; sp.a += Math.abs(d) < t ? d : Math.sign(d) * t;
+      h.x = Math.max(120, Math.min(MAP - 120, h.x + Math.cos(sp.a) * SPS * DT)); h.y = Math.max(120, Math.min(MAP - 120, h.y + Math.sin(sp.a) * SPS * DT));
+      for (let i = 1; i < sp.segs.length; i++) { const p = sp.segs[i - 1], q = sp.segs[i], dx = p.x - q.x, dy = p.y - q.y, dd = Math.hypot(dx, dy) || 1; const k = (dd - SPSP) / dd; q.x += dx * k; q.y += dy * k; } }
+    for (const s of arr) { if (s.bot || !s.alive || !s.ws || !s.ws.quest) continue; const q = s.ws.quest, h = s.segs[0], R = rad(s.m) + 16;
+      if (!q.done) {
+        for (const L of q.letters) if (!L.got && (L.x - h.x) ** 2 + (L.y - h.y) ** 2 < R * R) { L.got = true; q.mask |= 1 << L.i; }
+        if (q.mask === (1 << q.letters.length) - 1) { q.done = true; s.ws.send('{"t":"quest","k":"name"}'); }
+      } else if (!q.complete && sp) { const R2 = (rad(s.m) + 22) ** 2;
+        if (sp.segs.some(g => (g.x - h.x) ** 2 + (g.y - h.y) ** 2 < R2)) { q.complete = true; s.ws.send('{"t":"quest","k":"done"}'); } } } }
+  lettersFor(s, h) {                                     // o que ESTE jogador vê: só as letras dele que faltam, o progresso dele e (depois do nome completo) a posição da cobra no minimapa
+    const q = s.ws && s.ws.quest, sp = this.spc; if (!q) return null;
+    const lt = []; if (!q.done) for (const L of q.letters) if (!L.got && Math.abs(L.x - h.x) < VR && Math.abs(L.y - h.y) < VR) lt.push(Math.round(L.x), Math.round(L.y), L.i);
+    const r = { nm: this.ev.name, lt, lg: q.mask, ld: q.done ? 1 : 0, lc: q.complete ? 1 : 0 };
+    if (sp && Math.abs(sp.segs[0].x - h.x) < VR + 200 && Math.abs(sp.segs[0].y - h.y) < VR + 200) { const p = []; for (const g of sp.segs) p.push(Math.round(g.x), Math.round(g.y)); r.sp = p; }   // todos veem a cobra no mundo, sincronizada
+    if (q.done && !q.complete && sp) r.sm = [Math.round(sp.segs[0].x), Math.round(sp.segs[0].y)];
+    return r; }
+  events() {
+    const e = this.ev, arr = [...this.sn.values()];
+    if (!e) { if (this.tick >= this.nextEv && this.tick % 20 === 0 && arr.some(s => !s.bot && s.alive)) this.startEvent(); return; }
+    if (this.tick >= e.end) return this.endEvent();
+    if (e.type === 'letters') { this.lettersStep(arr); return; }
+    if (e.type === 'red' || e.type === 'bomb') { const list = e.type === 'red' ? this.orbs : this.bombs, want = e.type === 'red' ? NORB : NBOMB;
+      while (list.length < want) list.push({ x: rnd(120, MAP - 120), y: rnd(120, MAP - 120) }); }
+    if (e.type === 'red') {
+      for (const s of arr) { if (!s.alive || s.ch >= MAXCH) continue; const h = s.segs[0], R = rad(s.m) + 12;
+        for (let i = this.orbs.length - 1; i >= 0; i--) { const o = this.orbs[i]; if ((o.x - h.x) ** 2 + (o.y - h.y) ** 2 < R * R) { s.ch++; this.orbs.splice(i, 1); break; } } }
+      for (let i = this.proj.length - 1; i >= 0; i--) { const p = this.proj[i]; p.x += Math.cos(p.a) * PSPD * DT; p.y += Math.sin(p.a) * PSPD * DT;
+        let done = --p.life <= 0 || p.x < 0 || p.y < 0 || p.x > MAP || p.y > MAP;
+        if (!done) for (const o of arr) { if (o.id === p.id || !o.alive || o.prot > 0) continue; const R2 = (rad(o.m) * .8 + 8) ** 2;
+          for (const q of o.segs) if ((q.x - p.x) ** 2 + (q.y - p.y) ** 2 < R2) { this.hurt(o, .15, 'shot'); done = true; break; } if (done) break; }
+        if (done) this.proj.splice(i, 1); }
+    } else if (e.type === 'bomb') for (const s of arr) { if (!s.alive || s.prot > 0) continue; const h = s.segs[0], R = rad(s.m) + 16;
+      for (let i = this.bombs.length - 1; i >= 0; i--) { const b = this.bombs[i]; if ((b.x - h.x) ** 2 + (b.y - h.y) ** 2 < R * R) { this.hurt(s, .2, 'bomb'); this.bombs.splice(i, 1); break; } } }
+  }
+
+  ai(s) {                                            // IA dos bots: níveis 0 (iniciante) a 3 (difícil)
+    const h = s.segs[0], red = this.ev && this.ev.type === 'red'; let best = null, bd = 1e12;
+    for (const f of this.food) { const d = ((f.x - h.x) ** 2 + (f.y - h.y) ** 2) / f.v; if (d < bd) { bd = d; best = f; } }
+    if (red && s.ch < MAXCH) { let od = 700 * 700; for (const o of this.orbs) { const d = (o.x - h.x) ** 2 + (o.y - h.y) ** 2; if (d < od) { od = d; best = o; } } }   // bots também coletam as bolinhas vermelhas
+    let vx = 0, vy = 0; if (best) { const a = Math.atan2(best.y - h.y, best.x - h.x); vx = Math.cos(a); vy = Math.sin(a); }
+    if (this.ev && this.ev.type === 'bomb') for (const b of this.bombs) { const dx = h.x - b.x, dy = h.y - b.y, d2 = dx * dx + dy * dy, R = 170;   // todos os bots desviam das bombas
+      if (d2 < R * R && d2 > 1) { const w = 4 * (R * R - d2) / (R * R) / Math.sqrt(d2); vx += dx * w; vy += dy * w; } }
+    if (s.lvl === 0) { s.boost = false; s.ta = Math.atan2(vy, vx) + rnd(-.6, .6); return; }
+    let flee = 0;
+    let chase = null, cd = (s.lvl >= 3 ? 700 : 500) ** 2;
+    for (const o of this.sn.values()) { if (o === s || !o.alive) continue; const oh = o.segs[0];
+      const danger = s.m < o.m * 1.5, step = s.lvl >= 3 ? 2 : 3;
+      if (danger) for (let i = 0; i < o.segs.length; i += step) { const q = o.segs[i], dx = h.x - q.x, dy = h.y - q.y, d2 = dx * dx + dy * dy, R = i === 0 ? 260 : 120;
+        if (d2 < R * R && d2 > 1) { const w = 3 * (R * R - d2) / (R * R) / Math.sqrt(d2); vx += dx * w; vy += dy * w; if (d2 < 150 * 150) flee++; } }
+      if (s.lvl >= 2 && s.m >= o.m * 1.5) { const d2 = (oh.x - h.x) ** 2 + (oh.y - h.y) ** 2; if (d2 < cd) { cd = d2; chase = o; } } }
     if (chase) { const c = chase.segs[0], a = Math.atan2(c.y - h.y + Math.sin(chase.a) * 80, c.x - h.x + Math.cos(chase.a)   const loss = Math.min(o.m - 10, Math.max(4, o.m * frac)); if (loss <= 0) return 0; o.m -= loss;
     const n = Math.min(Math.max(4, Math.round(o.segs.length * frac)), o.segs.length - 6);                    // cauda perdida (visível mesmo em cobras gigantes)
     for (let i = 0; i < n; i++) o.segs.pop(); o.cut = (o.cut | 0) + n;

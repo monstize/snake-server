@@ -235,7 +235,7 @@ class Room {
     for (const s of all) { if (s.bot || !s.ws || s.ws.readyState !== 1) continue; const h = s.segs[0], sn = [], f = [];
       for (const o of all) { if (o.segs.some(q => Math.abs(q.x - h.x) < VR + 300 && Math.abs(q.y - h.y) < VR + 300)) {
         const sg = []; for (const q of o.segs) sg.push(Math.round(q.x), Math.round(q.y));
-        sn.push({ i: o.id, n: o.n, e: o.e, c: o.col, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), bo: o.bst, st: o === s ? Math.round(o.st) : undefined, s: sg }); } }
+        sn.push({ i: o.id, n: o.n, e: o.e, c: o.col, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), bo: o.bst, st: o === s ? Math.round(o.st) : undefined, p: o.prot > 0 ? 1 : undefined, x: o === s && o.exh ? 1 : undefined, s: sg }); } }
       for (const q of this.food) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) f.push(Math.round(q.x), Math.round(q.y), +q.v.toFixed(1), q.c);
       s.ws.send(JSON.stringify({ t: 's', sn, f, lb, mm, on, h: heat }));
       if (this.ev) { const vw = l => { const r = []; for (const q of l) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) r.push(Math.round(q.x), Math.round(q.y)); return r; };

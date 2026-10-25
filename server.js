@@ -31,10 +31,10 @@ function save(s) { local(s);                                   // ranking persis
 }
 
 class Room {
-  constructor(bots = true) { this.sn = new Map(); this.food = []; this.nid = 1; this.tick = 0; this.useBots = bots; this.idle = 0;
+  constructor(bots = true, options = {}) { this.code = options.code || ''; this.isPrivate = options.isPrivate === true; this.maxTotal = Number.isInteger(options.maxTotal) && options.maxTotal >= 4 && options.maxTotal <= 25 ? options.maxTotal : CAP; this.host = null; this.sn = new Map(); this.food = []; this.nid = 1; this.tick = 0; this.useBots = bots; this.idle = 0;
     this.ev = null; this.orbs = []; this.bombs = []; this.proj = []; this.nextEv = 0; this.spc = null; this.qs = new Set(); this.evSeq = 0;      // estado dos eventos especiais
     for (let i = 0; i < MAXF * .8; i++) this.addFood();
-    if (bots) { for (let i = 0; i < 8; i++) this.fillBots(); this.nextEv = Math.round(rnd(10000, 60000) / TICK); } }
+    if (bots) { this.fillBots(); this.nextEv = Math.round(rnd(10000, 60000) / TICK); } }
   humans() { let c = 0; for (const s of this.sn.values()) if (!s.bot && s.alive) c++; return c; }
   addFood(x, y, v, c, force) { if (this.food.length >= MAXF + (force ? 300 : 0)) return;
     this.food.push({ x: x ?? rnd(40, MAP - 40), y: y ?? rnd(40, MAP - 40), v: v || 1, c: c ?? (Math.random() * 8 | 0) }); }
@@ -215,14 +215,22 @@ class Room {
             break; } } } }
     for (const [id, s] of this.sn) if (!s.alive) this.sn.delete(id);
     for (let i = 0; i < 4 && this.food.length < MAXF * .8; i++) this.addFood();
-    if (this.useBots && this.tick % 40 === 0) this.fillBots();
+    if (this.useBots) this.fillBots();
     this.idle = this.humans() ? 0 : this.idle + 1;
     this.broadcast();
   }
   fillBots() {
-    const want = Math.max(4, TARGET - this.humans()), bots = [...this.sn.values()].filter(s => s.bot);
-    if (bots.length < want) this.spawn('🤖 ' + BOTN[Math.random() * BOTN.length | 0], EMOJIS[Math.random() * EMOJIS.length | 0], true);
-    else if (bots.length > want) this.sn.delete(bots[0].id);
+    if (!this.useBots) return;
+    for (const [id, s] of this.sn) if (!s.alive) this.sn.delete(id);
+    const want = Math.max(0, this.maxTotal - this.humans()), bots = [...this.sn.values()].filter(s => s.bot && s.alive);
+    while (bots.length > want) this.sn.delete(bots.pop().id);
+    while (bots.length < want) bots.push(this.spawn('🤖 ' + BOTN[Math.random() * BOTN.length | 0], EMOJIS[Math.random() * EMOJIS.length | 0], true));
+  }
+  status() {
+    const players = [...this.sn.values()].filter(s => !s.bot && s.alive);
+    return { code: this.code, isPrivate: this.isPrivate, max: this.maxTotal, humans: players.length,
+      bots: [...this.sn.values()].filter(s => s.bot && s.alive).length,
+      players: players.map(s => ({ id: s.id, nick: s.n, emoji: s.e, host: s.ws === this.host })) };
   }
   broadcast() {
     const all = [...this.sn.values()], lb = all.slice().sort((a, b) => b.m - a.m).slice(0, 5).map(s => [s.n, s.e, Math.floor(s.m), s.bot ? 1 : 0]);
@@ -235,17 +243,37 @@ class Room {
     for (const s of all) { if (s.bot || !s.ws || s.ws.readyState !== 1) continue; const h = s.segs[0], sn = [], f = [];
       for (const o of all) { if (o.segs.some(q => Math.abs(q.x - h.x) < VR + 300 && Math.abs(q.y - h.y) < VR + 300)) {
         const sg = []; for (const q of o.segs) sg.push(Math.round(q.x), Math.round(q.y));
-        sn.push({ i: o.id, n: o.n, e: o.e, c: o.col, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), bo: o.bst, st: o === s ? Math.round(o.st) : undefined, p: o.prot > 0 ? 1 : undefined, x: o === s && o.exh ? 1 : undefined, s: sg }); } }
+        sn.push({ i: o.id, n: o.n, e: o.e, c: o.col, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), bo: o.bst, st: o === s ? Math.round(o.st) : undefined, host: o.ws === this.host ? 1 : undefined, p: o.prot > 0 ? 1 : undefined, x: o === s && o.exh ? 1 : undefined, s: sg }); } }
       for (const q of this.food) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) f.push(Math.round(q.x), Math.round(q.y), +q.v.toFixed(1), q.c);
-      s.ws.send(JSON.stringify({ t: 's', sn, f, lb, mm, on, h: heat }));
+      s.ws.send(JSON.stringify({ t: 's', sn, f, lb, mm, on, h: heat, room: this.status() }));
       if (this.ev) { const vw = l => { const r = []; for (const q of l) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) r.push(Math.round(q.x), Math.round(q.y)); return r; };
         s.ws.send(JSON.stringify({ t: 'x', ev: [this.ev.type, Math.ceil((this.ev.end - this.tick) * TICK / 1000)], o: vw(this.orbs), bm: vw(this.bombs), pj: vw(this.proj), ch: s.ch, cd: Math.max(0, s.cd - this.tick) * TICK, ...(this.ev.type === 'letters' ? this.lettersFor(s, h) : null) })); } }
   }
 }
 
-const rooms = [];
-function place(ws) { let r = rooms.find(r => r.humans() < CAP); if (!r) { r = new Room(); r.timer = setInterval(() => r.step(), TICK); rooms.push(r); } return r; }
-setInterval(() => { for (let i = rooms.length - 1; i > 0; i--) if (rooms[i].idle > 1200) { clearInterval(rooms[i].timer); rooms.splice(i, 1); } }, 10000);
+const rooms = [], roomsByCode = new Map();
+function createRoom(isPrivate = false, maxTotal = CAP) {
+  let code; do { code = crypto.randomBytes(4).toString('hex').slice(0, 6).toUpperCase(); } while (roomsByCode.has(code));
+  const r = new Room(true, { code, isPrivate, maxTotal });
+  r.timer = setInterval(() => r.step(), TICK); rooms.push(r); roomsByCode.set(code, r); return r;
+}
+function place() { return rooms.find(r => !r.isPrivate && r.humans() < r.maxTotal) || createRoom(); }
+function cleanupRooms() {
+  for (let i = rooms.length - 1; i >= 0; i--) {
+    const r = rooms[i];
+    if (r.idle >= 60000 / TICK && (r.isPrivate || rooms.filter(q => !q.isPrivate).length > 1)) {
+      clearInterval(r.timer); for (const w of r.qs) w.quest = null; r.qs.clear(); roomsByCode.delete(r.code); rooms.splice(i, 1);
+    }
+  }
+}
+setInterval(cleanupRooms, 10000);
+function detach(ws) {
+  const r = ws.room; if (!r) return;
+  if (ws.snake) { const s = ws.snake; s.alive = false; s.ws = null; save(s); r.sn.delete(s.id); ws.snake = null; }
+  r.qs.delete(ws); ws.quest = null;
+  if (r.host === ws) r.host = [...r.sn.values()].find(s => !s.bot && s.alive)?.ws || null;
+  r.fillBots(); ws.room = null;
+}
 
 let rankCache = { t: 0, rows: [] };
 const server = http.createServer(async (req, res) => {
@@ -270,13 +298,27 @@ wss.on('connection', ws => {
     if (m.t === 'join' && !ws.snake) {
       let n = clean(m.nick); if (!okNick(n)) n = 'Jogador' + (Math.random() * 900 + 100 | 0);
       const e = EMOJIS.includes(m.emoji) ? m.emoji : okEmoji(m.emoji) ? m.emoji : EMOJIS[0], tok = typeof m.tok === 'string' && m.tok.length >= 32 && m.tok.length <= 200 ? m.tok : null;
-      ws.room = place(ws); { const bt = [...ws.room.sn.values()].find(b => b.bot); if (bt) ws.room.sn.delete(bt.id); } ws.snake = ws.room.spawn(n, e, false, ws, tok, undefined, undefined, m.col); ws.snake.ws = ws;
-      ws.send(JSON.stringify({ t: 'init', id: ws.snake.id, map: MAP }));
+      let r;
+      if (m.createPrivate === true) {
+        if (!Number.isInteger(m.maxSnakes) || m.maxSnakes < 4 || m.maxSnakes > 25) { ws.send(JSON.stringify({ t: 'err', msg: 'Escolha de 4 a 25 cobrinhas.' })); return; }
+        if (ws.room && ws.room.isPrivate && ws.room.host === ws && roomsByCode.get(ws.room.code) === ws.room) r = ws.room;
+        else r = createRoom(true, m.maxSnakes);
+      } else if (m.roomCode) {
+        const code = typeof m.roomCode === 'string' ? m.roomCode.trim().toUpperCase() : '';
+        r = /^[A-F0-9]{6}$/.test(code) ? roomsByCode.get(code) : null;
+        if (!r) { ws.send(JSON.stringify({ t: 'err', msg: 'Sala não encontrada ou encerrada.' })); return; }
+      } else r = place();
+      if (r.humans() >= r.maxTotal) { ws.send(JSON.stringify({ t: 'err', msg: 'Esta sala está lotada.' })); return; }
+      if (ws.room && ws.room !== r) detach(ws);
+      ws.room = r; if (r.isPrivate && !r.host) r.host = ws;
+      const bt = [...r.sn.values()].find(b => b.bot); if (bt) r.sn.delete(bt.id);
+      ws.snake = r.spawn(n, e, false, ws, tok, undefined, undefined, m.col); r.idle = 0; r.fillBots();
+      ws.send(JSON.stringify({ t: 'init', id: ws.snake.id, map: MAP, ...r.status() }));
       const ev = ws.room.ev; ws.room.joinQuest(ws); if (ev) ws.send(JSON.stringify({ t: 'ev', k: 'start', type: ev.type, dur: Math.ceil((ev.end - ws.room.tick) * TICK / 1000), late: 1, name: ev.name })); else ws.send('{"t":"x","ev":0}');   // sem evento: limpa o visual de qualquer evento que terminou enquanto o jogador estava morto (ele não recebe o aviso de fim)
     }
   });
-  ws.on('close', () => { clearInterval(rl); if (ws.snake) { ws.snake.alive = false; ws.snake.ws = null; save(ws.snake); if (ws.room && ws.room.useBots) ws.room.fillBots(); } });
+  ws.on('close', () => { clearInterval(rl); detach(ws); });
 });
 setInterval(() => { for (const c of wss.clients) { if (!c.alive) c.terminate(); else { c.alive = false; c.ping(); } } }, 20000);
 if (require.main === module) server.listen(PORT, () => console.log('Emoji Snake na porta', PORT));
-module.exports = { server, wss, Room, rad, rooms, MAP };
+module.exports = { server, wss, Room, rad, rooms, roomsByCode, cleanupRooms, MAP };

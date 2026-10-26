@@ -215,7 +215,7 @@ class Room {
             break; } } } }
     for (const [id, s] of this.sn) if (!s.alive) this.sn.delete(id);
     for (let i = 0; i < 4 && this.food.length < MAXF * .8; i++) this.addFood();
-    if (this.useBots) this.fillBots();
+    if (this.useBots && this.tick % 20 === 0) this.fillBots();
     this.idle = this.humans() ? 0 : this.idle + 1;
     this.broadcast();
   }
@@ -245,7 +245,7 @@ class Room {
         const sg = []; for (const q of o.segs) sg.push(Math.round(q.x), Math.round(q.y));
         sn.push({ i: o.id, n: o.n, e: o.e, c: o.col, b: o.bot ? 1 : 0, m: Math.floor(o.m), r: +rad(o.m).toFixed(1), bo: o.bst, st: o === s ? Math.round(o.st) : undefined, host: o.ws === this.host ? 1 : undefined, p: o.prot > 0 ? 1 : undefined, x: o === s && o.exh ? 1 : undefined, s: sg }); } }
       for (const q of this.food) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) f.push(Math.round(q.x), Math.round(q.y), +q.v.toFixed(1), q.c);
-      s.ws.send(JSON.stringify({ t: 's', sn, f, lb, mm, on, h: heat, room: this.status() }));
+      s.ws.send(JSON.stringify({ t: 's', sn, f, lb, mm, on, h: heat, room: this.tick % 20 === 0 ? this.status() : undefined }));
       if (this.ev) { const vw = l => { const r = []; for (const q of l) if (Math.abs(q.x - h.x) < VR && Math.abs(q.y - h.y) < VR) r.push(Math.round(q.x), Math.round(q.y)); return r; };
         s.ws.send(JSON.stringify({ t: 'x', ev: [this.ev.type, Math.ceil((this.ev.end - this.tick) * TICK / 1000)], o: vw(this.orbs), bm: vw(this.bombs), pj: vw(this.proj), ch: s.ch, cd: Math.max(0, s.cd - this.tick) * TICK, ...(this.ev.type === 'letters' ? this.lettersFor(s, h) : null) })); } }
   }
@@ -257,7 +257,7 @@ function createRoom(isPrivate = false, maxTotal = CAP) {
   const r = new Room(true, { code, isPrivate, maxTotal });
   r.timer = setInterval(() => r.step(), TICK); rooms.push(r); roomsByCode.set(code, r); return r;
 }
-function place() { return rooms.find(r => !r.isPrivate && r.humans() < r.maxTotal) || createRoom(); }
+function place() { return rooms.filter(r => !r.isPrivate && r.humans() < r.maxTotal).sort((a, b) => b.humans() - a.humans())[0] || createRoom(); }
 function cleanupRooms() {
   for (let i = rooms.length - 1; i >= 0; i--) {
     const r = rooms[i];
@@ -278,6 +278,9 @@ function detach(ws) {
 let rankCache = { t: 0, rows: [] };
 const server = http.createServer(async (req, res) => {
   const o = req.headers.origin, cors = { 'Access-Control-Allow-Origin': !ORIGINS.length ? '*' : ORIGINS.includes(o) ? o : ORIGINS[0], 'Vary': 'Origin', 'Content-Type': 'application/json' };
+  if (req.url === '/rooms') { if (!rooms.some(r => !r.isPrivate)) createRoom();
+    const list = rooms.filter(r => !r.isPrivate).map(r => ({ code: r.code, humans: r.humans(), max: r.maxTotal })).sort((a, b) => b.humans - a.humans);
+    res.writeHead(200, cors); return res.end(JSON.stringify({ rooms: list })); }
   if (req.url === '/health') { res.writeHead(200, cors); return res.end('{"ok":true}'); }
   if (req.url === '/ranking') {
     if (!SB) { res.writeHead(200, cors); return res.end(JSON.stringify({ rows: board.map(({ k, ...r }) => r) })); }

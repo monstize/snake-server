@@ -75,8 +75,8 @@ class Room {
   classicHits(arr) {                                  // Snake clássico (calculado só aqui no servidor): corpo/cauda matam sempre; cabeça x cabeça o maior come o menor
     const segD2 = (px, py, A, B) => { const vx = B.x - A.x, vy = B.y - A.y, l = vx * vx + vy * vy; let t = l ? ((px - A.x) * vx + (py - A.y) * vy) / l : 0; t = t < 0 ? 0 : t > 1 ? 1 : t; const x = A.x + vx * t - px, y = A.y + vy * t - py; return x * x + y * y; };
     const dead = new Map(), eats = [], clash = new Set();
-    for (let i = 0; i < arr.length; i++) { const a = arr[i]; if (!a.alive) continue; const ha = a.segs[0], ra = rad(a.m);
-      for (let j = i + 1; j < arr.length; j++) { const b = arr[j]; if (!b.alive) continue; const hb = b.segs[0], rb = rad(b.m);
+    for (let i = 0; i < arr.length; i++) { const a = arr[i]; if (!a.alive || a.prot > 0) continue; const ha = a.segs[0], ra = rad(a.m);
+      for (let j = i + 1; j < arr.length; j++) { const b = arr[j]; if (!b.alive || b.prot > 0) continue; const hb = b.segs[0], rb = rad(b.m);
         if ((ha.x - hb.x) ** 2 + (ha.y - hb.y) ** 2 < ((ra + rb) * .8) ** 2) { clash.add(a.id + ':' + b.id); clash.add(b.id + ':' + a.id);
           if (a.m > b.m) eats.push([a, b]); else if (b.m > a.m) eats.push([b, a]); else { dead.set(a, b); dead.set(b, a); } } } }
     for (const [w, l] of eats) if (!dead.has(w)) { dead.delete(l); l._eaten = w; }
